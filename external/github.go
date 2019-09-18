@@ -3,21 +3,20 @@ package external
 import (
 	"context"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/go-github/v28/github"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
-	"github.com/google/go-github/v28/github"
 )
 
 // GitHubMatcher matches emails and GitHub users.
 type GitHubMatcher struct {
-	client *github.Client
+	client           *github.Client
 	emailToUserCache map[string]string
-	userToNameCache map[string]string
+	userToNameCache  map[string]string
 }
 
 // NewGitHubMatcher creates a new matcher given a GitHub token.
@@ -39,9 +38,9 @@ func NewGitHubMatcher(apiURL, token string) (Matcher, error) {
 		return GitHubMatcher{}, err
 	}
 	return GitHubMatcher{
-		client: client,
+		client:           client,
 		emailToUserCache: make(map[string]string),
-		userToNameCache: make(map[string]string),
+		userToNameCache:  make(map[string]string),
 	}, nil
 }
 
@@ -53,12 +52,6 @@ var searchOpts = &github.SearchOptions{
 // CommitScan
 func (m GitHubMatcher) ScanCommit(ctx context.Context, repo, email, commit string) error {
 	logrus.Infof("scanning commit %s %s", repo, commit)
-	p := regexp.MustCompile(`.*github.com/([^/]+)/([^/]+?)(?:\.git)?$`) //TODO: initialize statically
-	match := p.FindStringSubmatch(repo)
-	if len(match) == 0 {
-		logrus.Infof("no github", repo, commit)
-		return nil
-	}
 
 	// do not check more than 1 commit per author/committer email
 	if _, ok := m.emailToUserCache[email]; ok {
@@ -68,57 +61,57 @@ func (m GitHubMatcher) ScanCommit(ctx context.Context, repo, email, commit strin
 
 	//TODO: refactor out, repeated in MatchByEmail
 	var numFailures uint64
-		const maxNumFailures = 8
-		const (
-			success = 0
-			retry   = 1
-			fail    = 2
-		)
-		check := func(response *github.Response, err error) int {
-			code := response.Response.StatusCode
-			if err == nil && code >= 200 && code < 300 {
-				return success
-			}
-
-			rateLimitHit := false
-			if val, exists := response.Response.Header["X-Ratelimit-Remaining"]; code == 403 &&
-				exists && len(val) == 1 && val[0] == "0" {
-				rateLimitHit = true
-			}
-			if rateLimitHit {
-				t, err := strconv.ParseInt(
-					response.Response.Header["X-Ratelimit-Reset"][0], 10, 64)
-				if err != nil {
-					logrus.Errorf("Bad X-Ratelimit-Reset header: %v. %s",
-						err)
-					return fail
-				}
-				resetTime := time.Unix(t, 0).Add(time.Second)
-				logrus.Warnf("rate limit was hit, waiting until %s", resetTime.String())
-				time.Sleep(resetTime.Sub(time.Now().UTC()))
-				return retry
-			}
-
-			if err != nil || code >= 500 && code < 600 || code == 408 || code == 429 {
-				sleepTime := time.Duration((1 << numFailures) * int64(time.Second))
-				logrus.Warnf("HTTP %d: %s. Sleeping until %s", code, err,
-					time.Now().UTC().Add(sleepTime))
-				time.Sleep(sleepTime)
-				numFailures++
-				if numFailures > maxNumFailures {
-					return fail
-				}
-				return retry
-			}
-			logrus.Warnf("HTTP %d: %s", code, err)
-			return fail
+	const maxNumFailures = 8
+	const (
+		success = 0
+		retry   = 1
+		fail    = 2
+	)
+	check := func(response *github.Response, err error) int {
+		code := response.Response.StatusCode
+		if err == nil && code >= 200 && code < 300 {
+			return success
 		}
 
+		rateLimitHit := false
+		if val, exists := response.Response.Header["X-Ratelimit-Remaining"]; code == 403 &&
+			exists && len(val) == 1 && val[0] == "0" {
+			rateLimitHit = true
+		}
+		if rateLimitHit {
+			t, err := strconv.ParseInt(
+				response.Response.Header["X-Ratelimit-Reset"][0], 10, 64)
+			if err != nil {
+				logrus.Errorf("Bad X-Ratelimit-Reset header: %v. %s",
+					err)
+				return fail
+			}
+			resetTime := time.Unix(t, 0).Add(time.Second)
+			logrus.Warnf("rate limit was hit, waiting until %s", resetTime.String())
+			time.Sleep(resetTime.Sub(time.Now().UTC()))
+			return retry
+		}
+
+		if err != nil || code >= 500 && code < 600 || code == 408 || code == 429 {
+			sleepTime := time.Duration((1 << numFailures) * int64(time.Second))
+			logrus.Warnf("HTTP %d: %s. Sleeping until %s", code, err,
+				time.Now().UTC().Add(sleepTime))
+			time.Sleep(sleepTime)
+			numFailures++
+			if numFailures > maxNumFailures {
+				return fail
+			}
+			return retry
+		}
+		logrus.Warnf("HTTP %d: %s", code, err)
+		return fail
+	}
+
 	for {
-		c, resp, err := m.client.Repositories.GetCommit(ctx, match[1], match[2], commit)
+		c, resp, err := m.client.Repositories.GetCommit(ctx, "jenkinsci", repo, commit)
 		status := check(resp, err)
 		if status == retry {
-	      continue
+			continue
 		} else if status == fail {
 			return err
 		}
